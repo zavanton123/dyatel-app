@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+# A tag push and a published release can both fire for the same version;
+# queue them instead of racing over the same assets.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Check the tag matches pubspec.yaml
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # pubspec carries "1.0.0+1"; the release name is the part before "+".
+          pubspec="$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)"
+          if [ "$tag" != "$pubspec" ]; then
+            echo "::error::Tag $tag does not match pubspec.yaml version $pubspec."
+            exit 1
+          fi
+          echo "Releasing $tag"
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build the release APK
+        run: flutter build apk --release
+
+      - name: Name the artifact after the version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          mv build/app/outputs/flutter-apk/app-release.apk "dyatel-${tag}.apk"
+          ls -lh "dyatel-${tag}.apk"
+
+      - name: Publish the assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          asset="dyatel-${tag}.apk"
+
+          # The tag can arrive before the release exists (a plain git push
+          # --tags) or after it (a release published from the UI).
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" \
+              --title "Dyatel $tag" \
+              --generate-notes
+          fi
